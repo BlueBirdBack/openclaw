@@ -77,6 +77,33 @@ function isWrappedFetchFailedMessage(message: string): boolean {
   return /:\s*fetch failed$/.test(message);
 }
 
+/**
+ * Detects the specific TLS session resumption TypeError thrown by Node.js's undici
+ * when a cached TLS session becomes invalid during reconnection.
+ *
+ * Error signature:
+ *   TypeError: Cannot read properties of null (reading 'setSession')
+ *   at TLSSocket.setSession (node:_tls_wrap:...)
+ *   at Client.connect (.../undici/lib/core/connect.js:...)
+ *
+ * This error is thrown synchronously inside Node's TLS stack and propagates as an
+ * uncaught exception, crashing the gateway. It is transient — undici will re-establish
+ * the connection on the next request without session resumption.
+ */
+function isUndiciTlsSessionResumeError(err: unknown): boolean {
+  if (!(err instanceof TypeError)) {
+    return false;
+  }
+  const message = err.message ?? "";
+  if (!message.includes("setSession")) {
+    return false;
+  }
+  const stack = err.stack ?? "";
+  const hasTlsMarker = stack.includes("TLSSocket.setSession") || stack.includes("_tls_wrap");
+  const hasUndiciMarker = stack.includes("undici");
+  return hasTlsMarker && hasUndiciMarker;
+}
+
 function getErrorCause(err: unknown): unknown {
   if (!err || typeof err !== "object") {
     return undefined;
@@ -168,6 +195,10 @@ export function isTransientNetworkError(err: unknown): boolean {
 
     const name = readErrorName(candidate);
     if (name && TRANSIENT_NETWORK_ERROR_NAMES.has(name)) {
+      return true;
+    }
+
+    if (isUndiciTlsSessionResumeError(candidate)) {
       return true;
     }
 
